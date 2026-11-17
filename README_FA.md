@@ -164,3 +164,34 @@ Lossهای مختلف مقدار عددی و مقیاس متفاوت دارند�
 - برآورد مستقل intrinsics دوربین RGB با نقاط گریز (منبع مقادیر پیش‌فرض `532.57, 531.54, 320, 240`): https://github.com/zinsmatt/7-Scenes-Calibration
 - مخزن رسمی PyTorch RelPoseNet و دستور resize تصاویر: https://github.com/AaltoVision/RelPoseNet
 - مقاله RelPoseNet: https://openaccess.thecvf.com/content_ICCV_2017_workshops/papers/w17/Laskar_Camera_Relocalization_by_Computing_Pairwise_Relative_Poses_Using_Convolutional_Neural_Network_ICCV_2017_paper.pdf
+
+## اجرای همه Lossها به‌صورت خودکار با Hyperparameter تصادفی
+
+فایل `run_all_losses.py` را از پوشه پچ به ریشه پروژه (کنار `main.py`) کپی کن. سپس در Colab از ریشه پروژه اجرا کن:
+
+```python
+!python run_all_losses.py --seed 2026
+```
+
+این اسکریپت هر ۱۴ گزینه را به‌ترتیب و در فرآیند جداگانه اجرا می‌کند: `mse`, `hard`, `soft`, `softgrid`, `dir`, `pmse`, `posenet10`, `posenet100`, `posenet`, `se3`, `ray`, `denseray`, `soft_sqrt`, `softgrid_sqrt`.
+
+برای هر Loss، مقادیر مرتبط به‌صورت تصادفی از مجموعه‌های زیر انتخاب می‌شوند:
+
+- `zf`: `[0.1, 0.5, 1, 2, 5, 10]`
+- `sigma`: `[0.25, 1, 2, 4, 8, 16, 32, 64]`
+- `rho`: `[4, 12, 24, 48]`
+- `beta`: `[1, 10, 25, 50, 100, 200]`
+
+مقادیر تصادفی و وضعیت هر اجرا در `random_loss_manifest_*.csv` ثبت می‌شوند. `--seed` باعث می‌شود انتخاب‌های تصادفی قابل تکرار باشند. اگر اجرا وسط کار قطع شد، می‌توانی از یک Loss مشخص ادامه بدهی، مثلاً:
+
+```python
+!python run_all_losses.py --seed 2026 --start soft
+```
+
+قبل از اجرای واقعی، فقط فرمان‌ها را بدون شروع آموزش بررسی کن:
+
+```python
+!python run_all_losses.py --seed 2026 --dry-run
+```
+
+**هشدار روش‌شناختی:** این حالت برای تست یکپارچگی کد و گرفتن خروجی اولیه است. چون هر Loss با Hyperparameter تصادفی متفاوت اجرا می‌شود، برنده/بازنده این اجراها را نمی‌توان به خود فرمول Loss نسبت داد. برای مقایسه علمی نهایی باید جستجوی Hyperparameter منصفانه و بودجه tuning یکسان برای هر Loss انجام شود. تعداد iteration، Batch Size، optimizer، learning rate و scheduler همان مقادیر Config اصلی می‌مانند.
