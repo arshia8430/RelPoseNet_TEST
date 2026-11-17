@@ -1,0 +1,583 @@
+﻿
+========================================
+FILE: C:\Users\Notebook\Desktop\New folder (2)\RelPoseNet_TEST\main.py
+========================================
+import hydra
+from relposenet.pipeline import Pipeline
+
+
+@hydra.main(config_path="configs", config_name="main")
+def main(cfg):
+    pipeline = Pipeline(cfg)
+    pipeline.run()
+
+
+if __name__ == "__main__":
+    main()
+
+========================================
+FILE: C:\Users\Notebook\Desktop\New folder (2)\RelPoseNet_TEST\experiments\main.py
+========================================
+import hydra
+from experiments.seven_scenes.pipeline import SevenScenesBenchmark
+
+
+@hydra.main(config_path="configs", config_name="main")
+def main(cfg):
+    benchmark = None
+    if cfg.experiment.experiment_params.name == '7scenes':
+        benchmark = SevenScenesBenchmark(cfg)
+
+    benchmark.evaluate()
+
+
+if __name__ == "__main__":
+    main()
+
+========================================
+FILE: C:\Users\Notebook\Desktop\New folder (2)\RelPoseNet_TEST\experiments\service\benchmark_base.py
+========================================
+import torch
+
+
+class Benchmark(object):
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def evaluate(self):
+        raise NotImplementedError
+
+========================================
+FILE: C:\Users\Notebook\Desktop\New folder (2)\RelPoseNet_TEST\experiments\seven_scenes\pipeline.py
+========================================
+import os
+from os import path as osp
+from tqdm import tqdm
+import torch
+from experiments.service.benchmark_base import Benchmark
+from relposenet.dataset import SevenScenesTestDataset
+from relposenet.augmentations import get_augmentations
+from relposenet.model import RelPoseNet
+
+
+class SevenScenesBenchmark(Benchmark):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+
+        self.dataloader = self._init_dataloader()
+        self.model = self._load_model_relposenet().to(self.device)
+
+    def _init_dataloader(self):
+        experiment_cfg = self.cfg.experiment.experiment_params
+
+        # define test augmentations
+        _, eval_aug = get_augmentations()
+
+        # test dataset
+        dataset = SevenScenesTestDataset(experiment_cfg, eval_aug)
+
+        # define a dataloader
+        dataloader = torch.utils.data.DataLoader(dataset,
+                                                 batch_size=experiment_cfg.bs,
+                                                 shuffle=False,
+                                                 pin_memory=True,
+                                                 num_workers=experiment_cfg.n_workers,
+                                                 drop_last=False)
+
+        return dataloader
+
+    def _load_model_relposenet(self):
+        print(f'Loading RelPoseNet model...')
+        model_params_cfg = self.cfg.model.model_params
+        model = RelPoseNet(model_params_cfg)
+
+        data_dict = torch.load(model_params_cfg.snapshot)
+        model.load_state_dict(data_dict['state_dict'])
+        print(f'Loading RelPoseNet model... Done!')
+        return model.eval()
+
+    def evaluate(self):
+        q_est_all, t_est_all = [], []
+        print(f'Evaluate on the dataset...')
+        with torch.no_grad():
+            for data_batch in tqdm(self.dataloader):
+                q_est, t_est = self.model(data_batch['img1'].to(self.device),
+                                          data_batch['img2'].to(self.device))
+
+                q_est_all.append(q_est)
+                t_est_all.append(t_est)
+
+        q_est_all = torch.cat(q_est_all).cpu().numpy()
+        t_est_all = torch.cat(t_est_all).cpu().numpy()
+
+        print(f'Write the estimates to a text file')
+        experiment_cfg = self.cfg.experiment.experiment_params
+
+        if not osp.exists(experiment_cfg.output.home_dir):
+            os.makedirs(experiment_cfg.output.home_dir)
+
+        with open(experiment_cfg.output.res_txt_fname, 'w') as f:
+            for q_est, t_est in zip(q_est_all, t_est_all):
+                f.write(f"{q_est[0]} {q_est[1]} {q_est[2]} {q_est[3]} {t_est[0]} {t_est[1]} {t_est[2]}\n")
+
+        print(f'Done')
+
+========================================
+FILE: C:\Users\Notebook\Desktop\New folder (2)\RelPoseNet_TEST\relposenet\augmentations.py
+========================================
+import torchvision.transforms as transforms
+
+
+def get_imagenet_mean_std():
+    mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+    return mean, std
+
+
+def get_augmentations():
+    train_aug = train_augmentations()
+    val_aug = eval_augmentations()
+    return train_aug, val_aug
+
+
+def train_augmentations():
+    mean, std = get_imagenet_mean_std()
+    transform = transforms.Compose([transforms.RandomCrop(size=224),
+                                    transforms.ColorJitter(brightness=0.4,
+                                                           contrast=0.4,
+                                                           saturation=0.4),
+                                    transforms.ToTensor(),
+                                    transforms.Normalize(mean, std)
+                                    ])
+
+    return transform
+
+
+def eval_augmentations():
+    mean, std = get_imagenet_mean_std()
+    transform = transforms.Compose([transforms.CenterCrop(size=224),
+                                    transforms.ToTensor(),
+                                    transforms.Normalize(mean, std)
+                                    ])
+
+    return transform
+
+========================================
+FILE: C:\Users\Notebook\Desktop\New folder (2)\RelPoseNet_TEST\relposenet\criterion.py
+========================================
+from abc import ABC
+import torch.nn as nn
+
+
+class RelPoseCriterion(nn.Module, ABC):
+    def __init__(self, alpha=1):
+        super().__init__()
+        self.alpha = alpha
+        self.q_loss = nn.MSELoss()
+        self.t_loss = nn.MSELoss()
+
+    def forward(self, q_gt, t_gt, q_est, t_est):
+        t_loss = self.t_loss(t_est, t_gt)
+        q_loss = self.q_loss(q_est, q_gt)
+
+        loss_total = t_loss + self.alpha * q_loss
+        return loss_total, t_loss.item(), q_loss.item()
+
+========================================
+FILE: C:\Users\Notebook\Desktop\New folder (2)\RelPoseNet_TEST\relposenet\dataset.py
+========================================
+import random
+from os import path as osp
+from collections import defaultdict
+from PIL import Image
+import torch
+
+
+class SevenScenesRelPoseDataset(object):
+    def __init__(self, cfg, split='train', transforms=None):
+        self.cfg = cfg
+        self.split = split
+        self.transforms = transforms
+        self.scenes_dict = defaultdict(str)
+        for i, scene in enumerate(['chess', 'fire', 'heads', 'office', 'pumpkin', 'redkitchen', 'stairs']):
+            self.scenes_dict[i] = scene
+
+        self.fnames1, self.fnames2, self.t_gt, self.q_gt = self._read_pairs_txt()
+
+    def _read_pairs_txt(self):
+        fnames1, fnames2, t_gt, q_gt = [], [], [], []
+
+        data_params = self.cfg.data_params
+
+        pairs_txt = data_params.train_pairs_fname if self.split == 'train' else data_params.val_pairs_fname
+        with open(pairs_txt, 'r') as f:
+            for line in f:
+                chunks = line.rstrip().split(' ')
+                scene_id = int(chunks[2])
+                fnames1.append(osp.join(data_params.img_dir, self.scenes_dict[scene_id], chunks[0][1:]))
+                fnames2.append(osp.join(data_params.img_dir, self.scenes_dict[scene_id], chunks[1][1:]))
+
+                t_gt.append(torch.FloatTensor([float(chunks[3]), float(chunks[4]), float(chunks[5])]))
+                q_gt.append(torch.FloatTensor([float(chunks[6]),
+                                               float(chunks[7]),
+                                               float(chunks[8]),
+                                               float(chunks[9])]))
+
+        return fnames1, fnames2, t_gt, q_gt
+
+    def __getitem__(self, item):
+        img1 = Image.open(self.fnames1[item]).convert('RGB')
+        img2 = Image.open(self.fnames2[item]).convert('RGB')
+        t_gt = self.t_gt[item]
+        q_gt = self.q_gt[item]
+
+        if self.transforms:
+            img1 = self.transforms(img1)
+            img2 = self.transforms(img2)
+
+        # randomly flip images in an image pair
+        if random.uniform(0, 1) > 0.5:
+            img1, img2 = img2, img1
+            t_gt = -self.t_gt[item]
+            q_gt = torch.FloatTensor([q_gt[0], -q_gt[1], -q_gt[2], -q_gt[3]])
+
+        return {'img1': img1,
+                'img2': img2,
+                't_gt': t_gt,
+                'q_gt': q_gt}
+
+    def __len__(self):
+        return len(self.fnames1)
+
+
+class SevenScenesTestDataset(object):
+    def __init__(self, experiment_cfg, transforms=None):
+        self.experiment_cfg = experiment_cfg
+        self.transforms = transforms
+        self.scenes_dict = defaultdict(str)
+        for i, scene in enumerate(['chess', 'fire', 'heads', 'office', 'pumpkin', 'redkitchen', 'stairs']):
+            self.scenes_dict[i] = scene
+
+        self.fnames1, self.fnames2 = self._read_pairs_txt()
+
+    def _read_pairs_txt(self):
+        fnames1, fnames2 = [], []
+
+        pairs_txt = self.experiment_cfg.paths.test_pairs_fname
+        img_dir = self.experiment_cfg.paths.img_path
+        with open(pairs_txt, 'r') as f:
+            for line in f:
+                chunks = line.rstrip().split(' ')
+                scene_id1 = int(chunks[2])
+                scene_id2 = int(chunks[3])
+                fnames1.append(osp.join(img_dir, self.scenes_dict[scene_id2], chunks[1][1:]))
+                fnames2.append(osp.join(img_dir, self.scenes_dict[scene_id1], chunks[0][1:]))
+
+        return fnames1, fnames2
+
+    def __getitem__(self, item):
+        img1 = Image.open(self.fnames1[item]).convert('RGB')
+        img2 = Image.open(self.fnames2[item]).convert('RGB')
+
+        if self.transforms:
+            img1 = self.transforms(img1)
+            img2 = self.transforms(img2)
+
+        return {'img1': img1,
+                'img2': img2,
+                }
+
+    def __len__(self):
+        return len(self.fnames1)
+
+========================================
+FILE: C:\Users\Notebook\Desktop\New folder (2)\RelPoseNet_TEST\relposenet\model.py
+========================================
+import torch
+import torch.nn as nn
+import torchvision.models as models
+
+
+class RelPoseNet(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+        self.backbone, self.concat_layer = self._get_backbone()
+        self.net_q_fc = nn.Linear(self.concat_layer.in_features, 4)
+        self.net_t_fc = nn.Linear(self.concat_layer.in_features, 3)
+        self.dropout = nn.Dropout(0.3)
+
+    def _get_backbone(self):
+        backbone, concat_layer = None, None
+        if self.cfg.backbone_net == 'resnet34':
+            backbone = models.resnet34(pretrained=True)
+            in_features = backbone.fc.in_features
+            backbone.fc = nn.Identity()
+            concat_layer = nn.Linear(2 * in_features, 2 * in_features)
+        return backbone, concat_layer
+
+    def _forward_one(self, x):
+        x = self.backbone(x)
+        x = x.view(x.size()[0], -1)
+        return x
+
+    def forward(self, x1, x2):
+        feat1 = self._forward_one(x1)
+        feat2 = self._forward_one(x2)
+
+        feat = torch.cat((feat1, feat2), 1)
+        q_est = self.net_q_fc(self.dropout(self.concat_layer(feat)))
+        t_est = self.net_t_fc(self.dropout(self.concat_layer(feat)))
+        return q_est, t_est
+
+========================================
+FILE: C:\Users\Notebook\Desktop\New folder (2)\RelPoseNet_TEST\relposenet\pipeline.py
+========================================
+import os
+from os import path as osp
+import time
+from tqdm import tqdm
+import torch
+from tensorboardX import SummaryWriter
+from relposenet.model import RelPoseNet
+from relposenet.dataset import SevenScenesRelPoseDataset
+from relposenet.augmentations import get_augmentations
+from relposenet.criterion import RelPoseCriterion
+from relposenet.utils import cycle, set_seed
+
+
+class Pipeline(object):
+    def __init__(self, cfg):
+        self.cfg = cfg
+        cfg_model = self.cfg.model_params
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        set_seed(self.cfg.seed)
+
+        # initialize dataloaders
+        self.train_loader, self.val_loader = self._init_dataloaders()
+        self.train_loader_iterator = iter(cycle(self.train_loader))
+
+        self.model = RelPoseNet(cfg_model).to(self.device)
+
+        # Optimizer
+        self.optimizer = torch.optim.Adam(self.model.parameters(),
+                                          lr=self.cfg.train_params.lr)
+
+        # Scheduler
+        cfg_scheduler = self.cfg.train_params.scheduler
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer,
+                                                         step_size=cfg_scheduler.lrate_decay_steps,
+                                                         gamma=cfg_scheduler.lrate_decay_factor)
+
+        # Criterion
+        self.criterion = RelPoseCriterion(self.cfg.train_params.alpha).to(self.device)
+
+        # create writer (logger)
+        self.writer = SummaryWriter(self.cfg.output_params.logger_dir)
+
+        self.start_step = 0
+        self.val_total_loss = 1e6
+        if self.cfg.model_params.resume_snapshot:
+            self._load_model(self.cfg.model_params.resume_snapshot)
+
+    def _init_dataloaders(self):
+        cfg_data = self.cfg.data_params
+        cfg_train = self.cfg.train_params
+
+        # get image augmentations
+        train_augs, val_augs = get_augmentations()
+
+        train_dataset = SevenScenesRelPoseDataset(cfg=self.cfg, split='train', transforms=train_augs)
+
+        val_dataset = SevenScenesRelPoseDataset(cfg=self.cfg, split='val', transforms=val_augs)
+
+        train_loader = torch.utils.data.DataLoader(train_dataset,
+                                                   batch_size=cfg_train.bs,
+                                                   shuffle=True,
+                                                   pin_memory=True,
+                                                   num_workers=cfg_train.n_workers,
+                                                   drop_last=True)
+
+        val_loader = torch.utils.data.DataLoader(val_dataset,
+                                                 batch_size=cfg_train.bs,
+                                                 shuffle=False,
+                                                 pin_memory=True,
+                                                 num_workers=cfg_train.n_workers,
+                                                 drop_last=True)
+        return train_loader, val_loader
+
+    def _predict_cam_pose(self, mini_batch):
+        q_est, t_est = self.model.forward(mini_batch['img1'].to(self.device),
+                                          mini_batch['img2'].to(self.device))
+        return q_est, t_est
+
+    def _save_model(self, step, loss_val, best_val=False):
+        if not osp.exists(self.cfg.output_params.snapshot_dir):
+            os.makedirs(self.cfg.output_params.snapshot_dir)
+
+        fname_out = 'best_val.pth' if best_val else 'snapshot{:06d}.pth'.format(step)
+        save_path = osp.join(self.cfg.output_params.snapshot_dir, fname_out)
+        model_state = self.model.state_dict()
+        torch.save({'step': step,
+                    'state_dict': model_state,
+                    'optimizer': self.optimizer.state_dict(),
+                    'scheduler': self.scheduler.state_dict(),
+                    'val_loss': loss_val,
+                    },
+                   save_path)
+
+    def _load_model(self, snapshot):
+        data_dict = torch.load(snapshot)
+        self.model.load_state_dict(data_dict['state_dict'])
+        self.optimizer.load_state_dict(data_dict['optimizer'])
+        self.scheduler.load_state_dict(data_dict['scheduler'])
+        self.start_step = data_dict['step']
+        if 'val_loss' in data_dict:
+            self.val_total_loss = data_dict['val_loss']
+
+    def _train_batch(self):
+        train_sample = next(self.train_loader_iterator)
+        q_est, t_est = self._predict_cam_pose(train_sample)
+
+        self.optimizer.zero_grad()
+
+        # compute loss
+        loss, t_loss_val, q_loss_val = self.criterion(train_sample['q_gt'].to(self.device),
+                                                      train_sample['t_gt'].to(self.device),
+                                                      q_est,
+                                                      t_est)
+        loss.backward()
+
+        # update the optimizer
+        self.optimizer.step()
+
+        # update the scheduler
+        self.scheduler.step()
+        return loss.item(), t_loss_val, q_loss_val
+
+    def _validate(self):
+        self.model.eval()
+        loss_total, t_loss_total, q_loss_total = 0., 0., 0.
+
+        with torch.no_grad():
+            for val_sample in tqdm(self.val_loader):
+                q_est, t_est = self._predict_cam_pose(val_sample)
+                # compute loss
+                loss, t_loss_val, q_loss_val = self.criterion(val_sample['q_gt'].to(self.device),
+                                                              val_sample['t_gt'].to(self.device),
+                                                              q_est,
+                                                              t_est)
+                loss_total += loss.item()
+                t_loss_total += t_loss_val
+                q_loss_total += q_loss_val
+
+        avg_total_loss = loss_total / len(self.val_loader)
+        avg_t_loss = t_loss_total / len(self.val_loader)
+        avg_q_loss = q_loss_total / len(self.val_loader)
+
+        self.model.train()
+
+        return avg_total_loss, avg_t_loss, avg_q_loss
+
+    def run(self):
+        print('Start training', self.start_step)
+        train_start_time = time.time()
+        train_log_iter_time = time.time()
+        for step in range(self.start_step + 1, self.start_step + self.cfg.train_params.n_train_iters):
+            train_loss_batch, _, _ = self._train_batch()
+
+            if step % self.cfg.output_params.log_scalar_interval == 0 and step > 0:
+                self.writer.add_scalar('Train_total_loss_batch', train_loss_batch, step)
+                print(f'Elapsed time [min] for {self.cfg.output_params.log_scalar_interval} iterations: '
+                      f'{(time.time() - train_log_iter_time) / 60.}')
+                train_log_iter_time = time.time()
+                print(f'Step {step} out of {self.cfg.train_params.n_train_iters} is done. Train loss (per batch): '
+                      f'{train_loss_batch}.')
+
+            if step % self.cfg.output_params.validate_interval == 0 and step > 0:
+                val_time = time.time()
+                best_val = False
+                val_total_loss, val_t_loss, val_q_loss = self._validate()
+                self.writer.add_scalar('Val_total_loss', val_total_loss, step)
+                self.writer.add_scalar('Val_t_loss', val_t_loss, step)
+                self.writer.add_scalar('Val_q_loss', val_q_loss, step)
+                if val_total_loss < self.val_total_loss:
+                    self.val_total_loss = val_total_loss
+                    best_val = True
+                self._save_model(step, val_total_loss, best_val=best_val)
+                print(f'Validation loss: {val_total_loss}, t_loss: {val_t_loss}, q_loss: {val_q_loss}')
+                print(f'Elapsed time [min] for validation: {(time.time() - val_time) / 60.}')
+                train_log_iter_time = time.time()
+
+        print(f'Elapsed time for training [min] {(time.time() - train_start_time) / 60.}')
+        print('Done')
+
+========================================
+FILE: C:\Users\Notebook\Desktop\New folder (2)\RelPoseNet_TEST\relposenet\utils.py
+========================================
+import numpy as np
+import random
+import torch
+
+
+def set_seed(seed):
+    torch.backends.cudnn.benchmark = True
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+
+
+def cycle(iterable):
+    while True:
+        for x in iterable:
+            yield x
+
+========================================
+FILE: C:\Users\Notebook\Desktop\New folder (2)\RelPoseNet_TEST\relposenet\__init__.py
+========================================
+
+========================================
+FILE: C:\Users\Notebook\Desktop\New folder (2)\RelPoseNet_TEST\tests\dataloader_tests.py
+========================================
+import hydra
+import torch
+from relposenet.dataset import SevenScenesRelPoseDataset
+from relposenet.augmentations import train_augmentations
+import matplotlib.pyplot as plt
+
+
+@hydra.main(config_path="../configs", config_name="main")
+def main(cfg):
+    augs = train_augmentations()
+    dataset = SevenScenesRelPoseDataset(cfg,
+                                        split='train',
+                                        transforms=augs)
+
+    dataloader = torch.utils.data.DataLoader(dataset,
+                                             batch_size=1,
+                                             shuffle=True,
+                                             num_workers=8)
+
+    for idx, mini_batch in enumerate(dataloader):
+
+        print(f'Pair id: {idx}')
+        print(f't: {mini_batch["t_gt"]}, q: {mini_batch["q_gt"]}')
+
+        fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(35, 10))
+        axes = axes.flatten()
+
+        axes[0].imshow(mini_batch['img1'].permute(0, 2, 3, 1).squeeze().numpy())
+        axes[1].imshow(mini_batch['img2'].permute(0, 2, 3, 1).squeeze().numpy())
+
+        axes[0].axis("off")
+        axes[1].axis("off")
+
+        plt.show(block=False)
+        plt.pause(3)
+        plt.close()
+
+
+if __name__ == '__main__':
+    main()

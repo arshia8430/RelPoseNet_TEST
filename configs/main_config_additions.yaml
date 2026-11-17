@@ -1,0 +1,28 @@
+# Merge these keys into the existing configs/main.yaml.
+# Do not replace the existing train_params block; add these fields to it.
+
+camera_params:
+  # Third-party RGB intrinsic estimate for 7-Scenes (vanishing-point based),
+  # not an official Microsoft calibration. Replace if you have a better K.
+  fx: 532.57
+  fy: 531.54
+  cx: 320.0
+  cy: 240.0
+  raw_width: 640
+  raw_height: 480
+  output_size: 224
+  expected_short_side: 256
+
+# Add these fields under the EXISTING train_params section:
+# loss_name: mse       # mse | hard | soft | softgrid | dir | pmse |
+#                     # posenet10 | posenet100 | posenet | se3 | ray |
+#                     # denseray | soft_sqrt | softgrid_sqrt
+# loss_zf: 1.0
+# loss_sigma: 4.0
+# loss_rho: 24.0
+# loss_beta: 100.0
+# run_id: ""           # optional suffix to avoid overwriting a previous run
+
+# Optional: add this under data_params only when pose files are stored separately
+# from the resized images. If omitted, pose_dir defaults to data_params.img_dir.
+# pose_dir: /content/7scenes_original
