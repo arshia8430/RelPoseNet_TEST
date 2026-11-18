@@ -229,6 +229,9 @@ class Pipeline:
             "R1": batch["R1"].to(self.device, non_blocking=True),
             "K": batch["K"].to(self.device, non_blocking=True),
             "scene_id": batch["scene_id"].to(self.device, non_blocking=True),
+            "rotation_inverse": batch["rotation_inverse"].to(
+                self.device, non_blocking=True
+            ),
         }
 
     def _forward_loss(self, batch, training):
