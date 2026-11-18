@@ -2,7 +2,6 @@ pipeline: Relative Camera Pose Estimation pipeline
 data_params:
   work_dir: /data/projects/RelPoseNet
   img_dir: /ssd/data/7scenes-light
-  pose_dir: ${data_params.img_dir}
   train_pairs_fname: ${data_params.work_dir}/assets/data/db_all_med_hard_train.txt
   val_pairs_fname: ${data_params.work_dir}/assets/data/db_all_med_hard_valid.txt
 model_params:
@@ -14,12 +13,6 @@ train_params:
   alpha: 1
   n_workers: 8
   n_train_iters: 125000 # 42k is the size of our training dataset 'db_all_med_hard_train.txt'
-  loss_name: mse
-  loss_zf: 1.0
-  loss_sigma: 4.0
-  loss_rho: 24.0
-  loss_beta: 100.0
-  run_id: ""
   scheduler:
     lrate_decay_steps: 15000
     lrate_decay_factor: 0.5

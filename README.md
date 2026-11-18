@@ -1,3 +1,5 @@
+> **Selectable losses (Hard / Soft / SoftGrid, baselines) + Colab runner: see [README_LOSSES.md](README_LOSSES.md) and `run_colab.ipynb`.**
+
 # RelPoseNet
 A PyTorch version of the ego-motion estimation pipeline proposed in [our work](https://openaccess.thecvf.com/content_ICCV_2017_workshops/papers/w17/Laskar_Camera_Relocalization_by_ICCV_2017_paper.pdf). The official implementation (in Lua) is available at https://github.com/AaltoVision/camera-relocalisation
 
@@ -43,24 +45,6 @@ Evaluation and training have been performed on the 7-Scenes dataset available [h
 - modify a config file `RelPoseNet/configs/main.yaml` by changing `work_dir`, `img_dir`, and `out_dir`
 - to perform training, run `RelPoseNet/main.py`
 
-#### Colab: prepare 7-Scenes and train all losses
-
-`prepare_and_run_losses.py` downloads the seven official 7-Scenes archives,
-prepares 256-pixel-short-side RGB images and pose files, verifies the pair-list
-paths, then trains each supported loss. The dataset is licensed for
-non-commercial use; read Microsoft's license before running the script.
-
-```bash
-python prepare_and_run_losses.py \
-  --project-dir /content/RelPoseNet_TEST \
-  --data-dir /content/drive/MyDrive/7scenes \
-  --output-dir /content/drive/MyDrive/RelPoseNet-output \
-  --accept-noncommercial-license
-```
-
-Use `--prepare-only` to download and validate the data without training. For a
-short smoke test, add `--iterations 200 --workers 2 --losses mse`. By default,
-the script trains all losses for the configured `train_params.n_train_iters`.
 
 ## License
 Our code is released under the Creative Commons BY-NC-SA 3.0, available only for non-commercial use.

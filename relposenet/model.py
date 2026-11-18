@@ -15,7 +15,10 @@ class RelPoseNet(nn.Module):
     def _get_backbone(self):
         backbone, concat_layer = None, None
         if self.cfg.backbone_net == 'resnet34':
-            backbone = models.resnet34(pretrained=True)
+            try:                                                   # new torchvision API
+                backbone = models.resnet34(weights=models.ResNet34_Weights.IMAGENET1K_V1)
+            except AttributeError:                                 # old torchvision
+                backbone = models.resnet34(pretrained=True)
             in_features = backbone.fc.in_features
             backbone.fc = nn.Identity()
             concat_layer = nn.Linear(2 * in_features, 2 * in_features)
