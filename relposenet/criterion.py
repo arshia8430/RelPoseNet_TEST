@@ -92,7 +92,7 @@ class RelPoseCriterion(nn.Module):
         else:
             self._softgrid_fn = None
 
-    def _camera_dicts(self, q_gt, t_gt, q_est, t_est, R1, K):
+    def _camera_dicts(self, q_gt, t_gt, q_est, t_est, R1, K, rotation_inverse=None):
         """Build camera-2 poses in camera-1 coordinates for geometric losses."""
         if R1 is None or K is None:
             raise ValueError(
@@ -100,21 +100,45 @@ class RelPoseCriterion(nn.Module):
             )
 
         B = q_est.shape[0]
+        if R1.ndim == 2:
+            R1 = R1.unsqueeze(0).expand(B, -1, -1)
         if R1.shape != (B, 3, 3):
-            raise ValueError(f"R1 must be (B,3,3), got {tuple(R1.shape)}")
+            raise ValueError(f"R1 must be (3,3) or (B,3,3), got {tuple(R1.shape)}")
         if K.ndim == 2:
             K = K.unsqueeze(0).expand(B, -1, -1)
         if K.shape != (B, 3, 3):
             raise ValueError(f"K must be (B,3,3), got {tuple(K.shape)}")
+        if R1.device != q_est.device or R1.dtype != q_est.dtype:
+            raise ValueError("R1, q_est and q_gt must be on the same device and dtype")
+        if K.device != q_est.device or K.dtype != q_est.dtype:
+            raise ValueError("K, q_est and q_gt must be on the same device and dtype")
 
         R_est = quaternion_wxyz_to_matrix(q_est)
         R_gt = quaternion_wxyz_to_matrix(q_gt)
 
         # The data-convention validator determines whether q stores R1^T R2
         # or its inverse. Convert both labels/predictions to camera-2-in-camera-1.
-        if self.rotation_inverse:
-            R_est = R_est.transpose(1, 2)
-            R_gt = R_gt.transpose(1, 2)
+        inverse = self.rotation_inverse if rotation_inverse is None else rotation_inverse
+        if torch.is_tensor(inverse):
+            inverse = inverse.to(device=q_est.device, dtype=torch.bool)
+            if inverse.ndim == 0:
+                inverse = inverse.expand(B)
+            elif inverse.shape != (B,):
+                raise ValueError(f"rotation_inverse must be a scalar or (B,), got {tuple(inverse.shape)}")
+        elif isinstance(inverse, bool):
+            inverse = torch.full((B,), inverse, dtype=torch.bool, device=q_est.device)
+        else:
+            raise TypeError("rotation_inverse must be a bool or a (B,) tensor")
+
+        if inverse.any():
+            if inverse.all():
+                R_est = R_est.transpose(1, 2)
+                R_gt = R_gt.transpose(1, 2)
+            else:
+                R_est = R_est.clone()
+                R_gt = R_gt.clone()
+                R_est[inverse] = R_est[inverse].transpose(1, 2)
+                R_gt[inverse] = R_gt[inverse].transpose(1, 2)
 
         # Pair-file t is the signed world-frame camera-centre displacement.
         # Rotate it into camera 1's frame before using it as a camera centre.
@@ -127,10 +151,32 @@ class RelPoseCriterion(nn.Module):
         cam_gt = {"K": K, "R": R_gt, "t": t_gt_local, "q": q_gt}
         return cam_est, cam_gt
 
-    def forward(self, q_gt, t_gt, q_est, t_est, R1=None, K=None):
+    def forward(
+        self,
+        q_gt,
+        t_gt,
+        q_est,
+        t_est,
+        R1=None,
+        K=None,
+        rotation_inverse=None,
+    ):
         """Return a per-sample loss vector, shape (B,)."""
+        if not (torch.is_tensor(q_gt) and torch.is_tensor(t_gt)
+                and torch.is_tensor(q_est) and torch.is_tensor(t_est)):
+            raise TypeError("q_gt, t_gt, q_est and t_est must be torch tensors")
         if q_gt.shape != q_est.shape or t_gt.shape != t_est.shape:
             raise ValueError("Prediction and target shapes must match")
+        if q_est.ndim != 2 or q_est.shape[-1] != 4:
+            raise ValueError(f"Quaternion tensors must have shape (B,4), got {tuple(q_est.shape)}")
+        if t_est.ndim != 2 or t_est.shape[-1] != 3:
+            raise ValueError(f"Translation tensors must have shape (B,3), got {tuple(t_est.shape)}")
+        if q_est.shape[0] != t_est.shape[0]:
+            raise ValueError("Quaternion and translation batch sizes must match")
+        if not (q_est.device == q_gt.device == t_est.device == t_gt.device):
+            raise ValueError("Prediction and target tensors must be on the same device")
+        if not (q_est.dtype == q_gt.dtype == t_est.dtype == t_gt.dtype):
+            raise ValueError("Prediction and target tensors must have the same dtype")
 
         # Original baseline: keep the original unnormalized regression outputs.
         if self.loss_name == "mse":
@@ -145,6 +191,10 @@ class RelPoseCriterion(nn.Module):
             B = q_est.shape[0]
             if K.ndim == 2:
                 K = K.unsqueeze(0).expand(B, -1, -1)
+            if K.shape != (B, 3, 3):
+                raise ValueError(f"K must be (3,3) or (B,3,3), got {tuple(K.shape)}")
+            if K.device != q_est.device or K.dtype != q_est.dtype:
+                raise ValueError("K, q_est and q_gt must be on the same device and dtype")
             R_est = quaternion_wxyz_to_matrix(q_est)
             R_gt = quaternion_wxyz_to_matrix(q_gt)
             raw_est = {"K": K, "R": R_est, "t": t_est, "q": q_est}
@@ -161,7 +211,19 @@ class RelPoseCriterion(nn.Module):
             return L.loss_se3(raw_est, raw_gt)
 
         # The remaining losses require a geometrically consistent relative camera pair.
-        cam_est, cam_gt = self._camera_dicts(q_gt, t_gt, q_est, t_est, R1, K)
+        cam_est, cam_gt = self._camera_dicts(
+            q_gt,
+            t_gt,
+            q_est,
+            t_est,
+            R1,
+            K,
+            rotation_inverse=(
+                self.rotation_inverse
+                if rotation_inverse is None
+                else rotation_inverse
+            ),
+        )
 
         if self.loss_name == "hard":
             return L.loss_hard(cam_est, cam_gt, zf=self.zf, img_size=self.img_size)

@@ -218,6 +218,7 @@ class SevenScenesRelPoseDataset(Dataset):
         img2 = Image.open(self.img2_paths[item]).convert("RGB")
         t_gt = self.t_gt[item].clone()
         q_gt = self.q_gt[item].clone()
+        pair_swapped = False
 
         if self.require_geometry:
             pose1 = self._read_pose(self.pose1_paths[item])
@@ -233,9 +234,12 @@ class SevenScenesRelPoseDataset(Dataset):
         if self.split == "train" and random.random() > 0.5:
             img1, img2 = img2, img1
             t_gt = -t_gt
+            # Conjugating wxyz gives the inverse relative rotation. This is
+            # different from sign negation, which represents the same rotation.
             q_gt = torch.stack((q_gt[0], -q_gt[1], -q_gt[2], -q_gt[3]))
             if self.require_geometry:
                 R1 = torch.tensor(pose2[:3, :3], dtype=torch.float32)
+            pair_swapped = True
 
         if self.transforms is None:
             raise RuntimeError("A paired image transform is required; use get_augmentations(camera_params).")
@@ -249,6 +253,10 @@ class SevenScenesRelPoseDataset(Dataset):
             "R1": R1,
             "K": K,
             "scene_id": torch.tensor(self.scene_ids[item], dtype=torch.long),
+            "rotation_inverse": torch.tensor(
+                self.rotation_inverse ^ pair_swapped,
+                dtype=torch.bool,
+            ),
         }
 
     def __len__(self):

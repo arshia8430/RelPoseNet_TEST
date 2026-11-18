@@ -237,6 +237,7 @@ class Pipeline:
         per_sample = self.criterion(
             data["q_gt"], data["t_gt"], q_est, t_est,
             R1=data["R1"], K=data["K"],
+            rotation_inverse=data["rotation_inverse"],
         )
         return per_sample, q_est, t_est, data
 
